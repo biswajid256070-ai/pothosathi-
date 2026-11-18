@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>দৃষ্টি সহায়ক</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none}
+input{user-select:text;-webkit-user-select:text}
+html,body{margin:0;height:100%;background:#050810;color:#fff;font-family:sans-serif;overflow:hidden}
+video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;opacity:.25}
+#app{position:relative;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:16px}
+h1{color:#ffe600;margin:0;font-size:26px;align-self:flex-start}
+#orb{width:220px;height:220px;border-radius:50%;background:radial-gradient(circle at 30% 30%,#ff9a9a,#ff4d4d 60%,#d42a3f);box-shadow:0 0 0 14px #ff4d4d33,0 0 60px #ff4d4d66;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:700;color:#111;text-align:center}
+#orb.busy{animation:p 1s infinite}
+@keyframes p{50%{transform:scale(1.08)}}
+#st{color:#ffe600;font-size:26px;font-weight:700;text-align:center;min-height:90px;padding:0 8px}
+#err{color:#ff8a8a;font-size:12px;text-align:center;word-break:break-word;min-height:16px;padding:0 8px}
+.row{display:flex;gap:10px;width:100%}
+button{flex:1;padding:18px;border-radius:16px;border:1px solid #2a3350;background:#151b30;color:#fff;font-size:20px}
+#hint{font-size:15px;color:#aab;text-align:center;margin:6px 0 0}
+#hint b{color:#ffe600}
+#panel{display:none;position:fixed;inset:0;background:#050810f2;z-index:10;padding:20px;overflow:auto}
+#panel h2{color:#ffe600;margin:0 0 14px}
+#panel label{display:block;margin:14px 0 6px;font-size:16px}
+#panel input{width:100%;padding:14px;font-size:18px;border-radius:12px;border:1px solid #2a3350;background:#151b30;color:#fff}
+#info{font-size:14px;color:#9f9;margin-top:6px}
+</style></head>
+<body>
+<video id="v" autoplay muted playsinline></video>
+<div id="app">
+  <h1>দৃষ্টি সহায়ক</h1>
+  <div id="orb">স্ক্রিনে<br>ট্যাপ করুন</div>
+  <div>
+    <div id="st">স্ক্রিনের যেকোনো জায়গায় ট্যাপ করুন</div>
+    <div id="err"></div>
+  </div>
+  <div style="width:100%">
+    <div class="row">
+      <button id="money">টাকা চেক</button>
+      <button id="set">সেটিংস</button>
+    </div>
+    <p id="hint"><b>ট্যাপ</b> = সামনে স্ক্যান। বিপদে স্ক্রিন <b>২ সেকেন্ড চেপে ধরুন</b> = হোয়াটসঅ্যাপে SOS</p>
+  </div>
+</div>
+
+<div id="panel">
+  <h2>সেটিংস</h2>
+  <label>অভিভাবকের হোয়াটসঅ্যাপ নম্বর (দেশের কোডসহ, যেমন 8801XXXXXXXXX)</label>
+  <input id="inNum" type="tel" inputmode="numeric" placeholder="8801XXXXXXXXX">
+  <label>Gemini API key</label>
+  <input id="inKey" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="AIza...">
+  <label style="display:flex;gap:12px;align-items:center;margin-top:18px;font-size:16px">
+    <input id="inLocal" type="checkbox" style="width:28px;height:28px;padding:0;flex:none">
+    সবসময় ফোনের ভেতরেই স্ক্যান করুন (key লাগবে না, দ্রুত। টাকা চেক হবে না)
+  </label>
+  <div id="info"></div>
+  <div class="row" style="margin-top:20px">
+    <button id="save">সেভ করুন</button>
+    <button id="close">বন্ধ করুন</button>
+  </div>
+</div>
+
+<script>
+const DEFAULT_KEY = "YOUR_GEMINI_API_KEY";
+// প্রথমটা ব্যস্ত থাকলে পরেরটা নিজে থেকে চেষ্টা করবে
+const MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.7-flash"];
+const WAIT_MS = 5000;  // এত মিলিসেকেন্ডে Gemini উত্তর না দিলে ফোনের ভেতরের পথে চলে যাবে
+const $ = id => document.getElementById(id);
+
+// localStorage কাজ না করলে মেমোরিতে রাখবে
+const mem = {};
+function getS(k){ try { return localStorage.getItem(k) || mem[k] || ""; } catch(e){ return mem[k] || ""; } }
+function setS(k,v){ mem[k]=v; try { localStorage.setItem(k,v); } catch(e){} }
+
+let busy = false, loc = null, stream = null;
+
+function speak(t) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = "bn-BD"; u.rate = 1.1;
+    speechSynthesis.speak(u);
+  } catch(e){}
+  $("st").textContent = t;
+}
+async function startCam() {
+  if (stream) return;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:640}}});
+    $("v").srcObject = stream;
+  } catch (e) { $("err").textContent = "ক্যামেরা: " + (e.message || e); speak("ক্যামেরার অনুমতি দিন"); }
+}
+if (navigator.geolocation) navigator.geolocation.watchPosition(
+  p => loc = p.coords, () => {}, {enableHighAccuracy:true, maximumAge:30000});
+
+function frame() {
+  const v = $("v"); if (!v.videoWidth) return null;
+  const c = document.createElement("canvas");
+  const w = 480; c.width = w; c.height = Math.round(w * v.videoHeight / v.videoWidth);
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", .6).split(",")[1];
+}
+// ===== ফোনের ভেতরে চলা বাধা-শনাক্তকরণ (Gemini ছাড়া) =====
+const BN = {person:"মানুষ",bicycle:"সাইকেল",car:"গাড়ি",motorcycle:"মোটরসাইকেল",bus:"বাস",truck:"ট্রাক",train:"ট্রেন",boat:"নৌকা",
+  "traffic light":"ট্রাফিক বাতি","stop sign":"থামার চিহ্ন",bench:"বেঞ্চ",bird:"পাখি",cat:"বিড়াল",dog:"কুকুর",horse:"ঘোড়া",sheep:"ভেড়া",cow:"গরু",
+  backpack:"ব্যাগ",umbrella:"ছাতা",handbag:"ব্যাগ",suitcase:"স্যুটকেস",bottle:"বোতল",cup:"কাপ",chair:"চেয়ার",couch:"সোফা","potted plant":"গাছ",
+  bed:"বিছানা","dining table":"টেবিল",toilet:"টয়লেট",tv:"টিভি",laptop:"ল্যাপটপ","cell phone":"মোবাইল",refrigerator:"ফ্রিজ",book:"বই",clock:"ঘড়ি",
+  oven:"চুলা",sink:"বেসিন"};
+let localModel = null, localLoading = null;
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const el = document.createElement("script");
+    el.src = src; el.onload = res; el.onerror = () => rej(new Error("লোড হয়নি"));
+    document.head.appendChild(el);
+  });
+}
+function loadLocal() {
+  if (localModel) return Promise.resolve(localModel);
+  if (!localLoading) localLoading = (async () => {
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js");
+    await loadScript("https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js");
+    localModel = await cocoSsd.load({base: "lite_mobilenet_v2"});
+    return localModel;
+  })().catch(e => { localLoading = null; throw e; });
+  return localLoading;
+}
+async function localScan() {
+  const m = await loadLocal();
+  const v = $("v"), W = v.videoWidth, H = v.videoHeight;
+  if (!W) throw new Error("ক্যামেরা চালু নেই");
+  const preds = (await m.detect(v, 10)).filter(p => p.score > 0.5);
+  const objs = preds.map(p => {
+    const [x, y, w, h] = p.bbox, cx = (x + w / 2) / W, hf = h / H;
+    return {
+      zone: cx < 0.34 ? "বামে" : cx > 0.66 ? "ডানে" : "সামনে",
+      hf, name: BN[p.class] || p.class,
+      dist: hf > 0.7 ? "খুব কাছে" : hf > 0.4 ? "কাছে" : "একটু দূরে"
+    };
+  }).sort((a, b) => b.hf - a.hf).slice(0, 3);
+  if (!objs.length) return "চেনা কোনো জিনিস দেখছি না। দেয়াল বা গর্ত আমি চিনতে পারি না, সাবধানে চলুন।";
+  const blocked = new Set(objs.filter(o => o.hf > 0.35).map(o => o.zone));
+  const free = ["বামে", "সামনে", "ডানে"].filter(z => !blocked.has(z));
+  let t = (objs.some(o => o.hf > 0.7) ? "সাবধান! " : "") + objs.map(o => `${o.zone} ${o.dist} ${o.name}`).join(", ") + "। ";
+  if (!blocked.size) t += "কাছে বড় বাধা নেই, তবু সাবধানে চলুন।";
+  else if (!free.length) t += "সব দিকেই বাধা, থামুন।";
+  else t += "ফাঁকা দিক: " + free.join(", ") + "।";
+  return t;
+}
+function done() { busy = false; $("orb").classList.remove("busy"); }
+
+async function ask(prompt) {
+  if (busy) return;
+  busy = true; $("orb").classList.add("busy"); $("err").textContent = "";
+  speak("দেখছি…");
+  try {
+    await startCam();
+    if (!$("v").videoWidth) await new Promise(r => setTimeout(r, 1000));
+    const img = frame();
+    if (!img) { $("err").textContent = "ক্যামেরার ছবি পাওয়া যায়নি"; speak("ক্যামেরা চালু হয়নি, অনুমতি দিন"); throw "cam"; }
+    const key = (getS("key") || DEFAULT_KEY).trim();
+    const noKey = !key || key === "YOUR_GEMINI_API_KEY";
+    if (prompt === SCAN && (getS("local") === "1" || noKey)) { speak(await localScan()); done(); return; }
+    if (noKey) { speak("আগে সেটিংসে API key দিন"); throw "nokey"; }
+    const body = JSON.stringify({
+      contents:[{parts:[{text:prompt},{inline_data:{mime_type:"image/jpeg",data:img}}]}],
+      generationConfig:{maxOutputTokens:400, thinkingConfig:{thinkingLevel:"low"}}
+    });
+    let r = {status:0}, j = {error:{message:"৫ সেকেন্ডে উত্তর আসেনি"}};
+    const deadline = Date.now() + WAIT_MS;
+    for (const m of MODELS) {
+      const left = deadline - Date.now();
+      if (left < 700) break;
+      const ac = new AbortController();
+      const to = setTimeout(() => ac.abort(), Math.min(left, 3000));
+      try {
+        r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(key)}`, {
+          method:"POST", headers:{"Content-Type":"application/json"}, body, signal: ac.signal
+        });
+        j = await r.json();
+      } catch (e) { r = {status:0}; j = {error:{message:String(e.message || e)}}; }
+      clearTimeout(to);
+      if (!j.error) break;
+      if (![0,404,429,500,503,504].includes(r.status)) break;
+      $("err").textContent = m + ": " + r.status + " — অন্য মডেল চেষ্টা করছি";
+    }
+    let localErr = "";
+    if (j.error && prompt === SCAN) {
+      try { speak("ইন্টারনেট ধীর, ফোনেই দেখছি। " + await localScan()); done(); return; }
+      catch (le) { localErr = " | ফোনের মডেল: " + (le.message || le); }
+    }
+    if (j.error) {
+      $("err").textContent = "API: " + r.status + " " + (j.error.message || "") + localErr;
+      if (r.status === 400 || r.status === 403) speak("API key ঠিক নেই, সেটিংসে আবার দিন");
+      else if (r.status === 429) speak("অনেক বেশি অনুরোধ হয়েছে, একটু পরে চেষ্টা করুন");
+      else speak("উত্তর পাওয়া যায়নি, আবার ট্যাপ করুন");
+    } else {
+      const txt = j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0].text;
+      if (!txt) { $("err").textContent = "খালি উত্তর এসেছে"; speak("উত্তর পাওয়া যায়নি, আবার ট্যাপ করুন"); }
+      else speak(txt.trim());
+    }
+  } catch (e) {
+    if (e !== "cam" && e !== "nokey") { $("err").textContent = "নেটওয়ার্ক/ত্রুটি: " + (e.message || e); speak("ইন্টারনেট বা সংযোগে সমস্যা, আবার ট্যাপ করুন"); }
+  }
+  busy = false; $("orb").classList.remove("busy");
+}
+const SCAN = "তুমি একজন অন্ধ ব্যক্তির পথ-সহায়ক। ছবি দেখে বাংলায় সর্বোচ্চ ২টি ছোট বাক্যে বলো: ১) সামনে কী আছে (দূরত্বসহ আনুমানিক), ২) বামে, সামনে নাকি ডানে—কোন দিক ফাঁকা ও চলার জন্য নিরাপদ। বাধা খুব কাছে হলে শুরুতে 'সাবধান' বলো। অতিরিক্ত কথা নয়।";
+const MONEY = "ছবির টাকা বা নোট বাংলায় বলো: কত টাকার নোট/কয়েন। শুধু ১ বাক্য।";
+
+// ট্যাপ = স্ক্যান, ২ সেকেন্ড চেপে ধরা = SOS
+let timer = null, sosDone = false;
+const ignore = e => e.target.closest("button, #panel");
+document.addEventListener("pointerdown", e => {
+  if (ignore(e)) return;
+  sosDone = false;
+  timer = setTimeout(() => { sosDone = true; sos(); }, 2000);
+});
+document.addEventListener("pointerup", e => {
+  if (ignore(e)) return;
+  clearTimeout(timer);
+  if (!sosDone) ask(SCAN);
+});
+$("money").onclick = () => ask(MONEY);
+
+function refreshInfo() {
+  const k = getS("key"), n = getS("num");
+  $("info").textContent = (k ? "✔ key সেভ আছে (শেষ ৪ অক্ষর: " + k.slice(-4) + ")" : "✘ key নেই") + " | " + (n ? "✔ নম্বর সেভ আছে" : "✘ নম্বর নেই");
+}
+$("set").onclick = () => {
+  $("inNum").value = getS("num");
+  $("inKey").value = "";
+  $("inLocal").checked = getS("local") === "1";
+  refreshInfo();
+  $("panel").style.display = "block";
+};
+$("close").onclick = () => { $("panel").style.display = "none"; };
+$("save").onclick = () => {
+  const n = $("inNum").value.replace(/\D/g, "");
+  const k = $("inKey").value.trim();
+  if (n) setS("num", n);
+  if (k) setS("key", k);
+  setS("local", $("inLocal").checked ? "1" : "0");
+  refreshInfo();
+  $("inKey").value = "";
+  speak("সেভ হয়েছে");
+};
+
+function sos() {
+  const num = getS("num");
+  if (!num) { speak("আগে সেটিংসে অভিভাবকের নম্বর দিন"); return; }
+  const link = loc ? `https://maps.google.com/?q=${loc.latitude},${loc.longitude}` : "লোকেশন পাওয়া যায়নি";
+  const msg = `🆘 জরুরি! আমি বিপদে আছি, সাহায্য দরকার। আমার অবস্থান: ${link}`;
+  speak("হোয়াটসঅ্যাপ খুলছি, সেন্ড বাটনে চাপ দিন");
+  setTimeout(() => location.href = `https://wa.me/${num}?text=${encodeURIComponent(msg)}`, 1200);
+}
+startCam();
+setTimeout(() => loadLocal().catch(() => {}), 3000);
+</script>
+</body></html>
